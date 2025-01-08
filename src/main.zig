@@ -18,11 +18,12 @@ pub fn findExecutable(path_var: []const u8, arg: []const u8) ErrorEnum![]const u
     const allocator = std.heap.page_allocator;
     while (parsed_dir.next()) |dir_str| {
         const full_path = std.fs.path.join(allocator, &[_][]const u8{ dir_str, arg }) catch |err| {
-            std.debug.print("fail to find directory: {}", .{err});
+            handleError(err);
             return ErrorEnum.FileNotFound;
         };
         defer allocator.free(full_path);
-        const file = std.fs.openFileAbsolute(full_path, .{ .mode = .read_only }) catch {
+        const file = std.fs.openFileAbsolute(full_path, .{ .mode = .read_only }) catch |err| {
+            handleError(err);
             continue;
         };
         defer file.close();
@@ -134,7 +135,46 @@ pub fn main() !void {
 }
 
 fn handleError(err: anyerror) void {
-    std.debug.print("Error occured: {}\n", .{err});
+    const timestamp = std.time.timestamp();
+
+    const allocator = std.heap.page_allocator;
+    var env_map = std.process.getEnvMap(allocator) catch |envErr| {
+        handleError(envErr);
+        return;
+    };
+    defer env_map.deinit();
+
+    const home = env_map.get("HOME") orelse "/";
+    const path = std.fmt.allocPrint(allocator, "{s}/Documents/{s}", .{ home, "shell.log" }) catch |fmtErr| {
+        std.debug.print("warning: cannot format string: {}\n", .{fmtErr});
+        return;
+    };
+    const file = std.fs.openFileAbsolute(path, .{
+        .mode = .read_write,
+    }) catch |fileErr| {
+        std.debug.print("warning: cannot write error log: {}\n", .{fileErr});
+        return;
+    };
+    defer file.close();
+
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const fba_allocator = fba.allocator();
+
+    const err_msg = std.fmt.allocPrint(
+        fba_allocator,
+        "[{d}] Error: {s}\n",
+        .{ timestamp, @errorName(err) },
+    ) catch |fmtErr| {
+        std.debug.print("warning: cannot format error message: {}\n", .{fmtErr});
+        return;
+    };
+    defer fba_allocator.free(err_msg);
+
+    file.writeAll(err_msg) catch |writeErr| {
+        std.debug.print("warning: cannot write to log file: {}\n", .{writeErr});
+        return;
+    };
 }
 
 fn parseStrToEnum(str: []const u8) DefaultCommand {
